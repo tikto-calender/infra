@@ -1,0 +1,211 @@
+name: Terraform validate and plan
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/terraform-plan.yml"
+      - "environments/**"
+      - "modules/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-plan-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
+
+jobs:
+  validate:
+    name: Format and validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+
+      - name: Validate every root stack
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          stacks=(
+            "environments/bootstrap"
+            "environments/shared"
+            "environments/dev"
+            "environments/prod"
+          )
+
+          for stack in "${stacks[@]}"; do
+            echo "Validating ${stack}"
+            terraform -chdir="${stack}" init -backend=false -input=false
+            terraform -chdir="${stack}" validate -no-color
+          done
+
+  plan:
+    name: Ordered infrastructure plans
+    if: github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: infrastructure-plan
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      AWS_TERRAFORM_PLAN_ROLE_ARN: ${{ vars.AWS_TERRAFORM_PLAN_ROLE_ARN }}
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      SHARED_TFVARS_JSON: ${{ vars.SHARED_TFVARS_JSON }}
+      DEV_TFVARS_JSON: ${{ vars.DEV_TFVARS_JSON }}
+      PROD_TFVARS_JSON: ${{ vars.PROD_TFVARS_JSON }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+
+      - name: Check workflow configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${AWS_TERRAFORM_PLAN_ROLE_ARN}" ]]; then
+            echo "GitHub Environment variable AWS_TERRAFORM_PLAN_ROLE_ARN is required."
+            exit 1
+          fi
+
+          if [[ -z "${TF_STATE_BUCKET}" ]]; then
+            echo "GitHub Environment variable TF_STATE_BUCKET is required."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_TERRAFORM_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: terraform-plan-${{ github.run_id }}
+
+      - name: Check remote-state bucket
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws s3api head-bucket --bucket "${TF_STATE_BUCKET}"
+
+      - name: Plan stacks in dependency order
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p plans
+
+          write_tfvars() {
+            local stack_dir="$1"
+            local tfvars_json="$2"
+            local variable_name="$3"
+
+            if [[ -z "${tfvars_json}" ]]; then
+              echo "GitHub variable ${variable_name} is required."
+              exit 1
+            fi
+
+            if ! jq -e 'type == "object"' <<<"${tfvars_json}" >/dev/null; then
+              echo "${variable_name} must contain a valid JSON object."
+              exit 1
+            fi
+
+            printf '%s\n' "${tfvars_json}" > "${stack_dir}/ci.auto.tfvars.json"
+          }
+
+          plan_stack() {
+            local label="$1"
+            local stack_dir="$2"
+            local state_key="$3"
+            local artifact_name="$4"
+
+            echo "Planning ${label}"
+
+            terraform -chdir="${stack_dir}" init -reconfigure -input=false \
+              -backend-config="bucket=${TF_STATE_BUCKET}" \
+              -backend-config="key=${state_key}" \
+              -backend-config="region=${AWS_REGION}" \
+              -backend-config="encrypt=true" \
+              -backend-config="use_lockfile=true"
+
+            terraform -chdir="${stack_dir}" plan \
+              -input=false \
+              -lock-timeout=5m \
+              -out=tfplan
+
+            terraform -chdir="${stack_dir}" show -no-color tfplan \
+              > "${GITHUB_WORKSPACE}/plans/${artifact_name}.txt"
+
+            local plan_json
+            plan_json="$(terraform -chdir="${stack_dir}" show -json tfplan)"
+
+            local creates updates deletes replaces
+            creates="$(jq '[.resource_changes[]? | select(.change.actions == ["create"])] | length' <<<"${plan_json}")"
+            updates="$(jq '[.resource_changes[]? | select(.change.actions == ["update"])] | length' <<<"${plan_json}")"
+            deletes="$(jq '[.resource_changes[]? | select(.change.actions == ["delete"])] | length' <<<"${plan_json}")"
+            replaces="$(jq '[.resource_changes[]? | select(.change.actions == ["delete", "create"] or .change.actions == ["create", "delete"])] | length' <<<"${plan_json}")"
+
+            {
+              echo "### ${label}"
+              echo
+              echo "| Create | Update | Delete | Replace |"
+              echo "| ---: | ---: | ---: | ---: |"
+              echo "| ${creates} | ${updates} | ${deletes} | ${replaces} |"
+              echo
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+
+          write_tfvars "environments/shared" "${SHARED_TFVARS_JSON}" "SHARED_TFVARS_JSON"
+          plan_stack \
+            "Shared" \
+            "environments/shared" \
+            "tikto/shared/terraform.tfstate" \
+            "shared"
+
+          write_tfvars "environments/dev" "${DEV_TFVARS_JSON}" "DEV_TFVARS_JSON"
+          plan_stack \
+            "Development" \
+            "environments/dev" \
+            "tikto/dev/terraform.tfstate" \
+            "dev"
+
+          write_tfvars "environments/prod" "${PROD_TFVARS_JSON}" "PROD_TFVARS_JSON"
+          plan_stack \
+            "Production" \
+            "environments/prod" \
+            "tikto/prod/terraform.tfstate" \
+            "prod"
+
+      - name: Upload readable plans
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plans-${{ github.run_number }}
+          path: plans/*.txt
+          if-no-files-found: warn
+          retention-days: 5
