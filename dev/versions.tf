@@ -8,11 +8,5 @@ terraform {
     }
   }
 
-  backend "s3" {
-    bucket       = "tikto-terraform-state"
-    key          = "tikto/dev/terraform.tfstate"
-    region       = "ap-southeast-2"
-    encrypt      = true
-    use_lockfile = true
-  }
+  backend "s3" {}
 }

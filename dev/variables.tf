@@ -1,3 +1,24 @@
+variable "network" {
+  description = "VPC address ranges, availability zones, and NAT topology for this environment."
+  type = object({
+    vpc_cidr             = string
+    availability_zones   = list(string)
+    public_subnet_cidrs  = list(string)
+    private_subnet_cidrs = list(string)
+    nat_gateway_mode     = string
+  })
+}
+
+variable "assign_public_ip" {
+  type        = bool
+  description = "Assign a public IPv4 address to each ECS task."
+}
+
+variable "log_retention_days" {
+  type        = number
+  description = "Retention for ECS application logs, in days."
+}
+
 variable "aws_region" {
   type    = string
   default = "ap-southeast-2"

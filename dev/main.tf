@@ -16,11 +16,11 @@ module "network" {
   source = "../modules/network"
 
   name                 = local.name
-  vpc_cidr             = "10.21.0.0/16"
-  availability_zones   = ["ap-southeast-2a", "ap-southeast-2b", "ap-southeast-2c"]
-  public_subnet_cidrs  = ["10.21.0.0/24", "10.21.1.0/24", "10.21.2.0/24"]
-  private_subnet_cidrs = ["10.21.10.0/24", "10.21.11.0/24", "10.21.12.0/24"]
-  nat_gateway_mode     = "none"
+  vpc_cidr             = var.network.vpc_cidr
+  availability_zones   = var.network.availability_zones
+  public_subnet_cidrs  = var.network.public_subnet_cidrs
+  private_subnet_cidrs = var.network.private_subnet_cidrs
+  nat_gateway_mode     = var.network.nat_gateway_mode
 }
 
 module "database" {
@@ -39,7 +39,7 @@ module "application" {
   aws_region                 = var.aws_region
   vpc_id                     = module.network.vpc_id
   subnet_ids                 = module.network.public_subnet_ids
-  assign_public_ip           = true
+  assign_public_ip           = var.assign_public_ip
   backend_image              = var.backend_image
   notification_image         = var.notification_image
   dynamodb_table_name        = module.database.name
@@ -48,7 +48,7 @@ module "application" {
   notification_desired_count = var.notification_desired_count
   capacity_provider          = var.capacity_provider
   container_insights         = false
-  log_retention_days         = 14
+  log_retention_days         = var.log_retention_days
 }
 
 module "edge" {

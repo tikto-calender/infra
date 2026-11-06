@@ -1,3 +1,24 @@
+variable "network" {
+  description = "VPC address ranges, availability zones, and NAT topology for this environment."
+  type = object({
+    vpc_cidr             = string
+    availability_zones   = list(string)
+    public_subnet_cidrs  = list(string)
+    private_subnet_cidrs = list(string)
+    nat_gateway_mode     = string
+  })
+}
+
+variable "map_public_ip_on_launch" {
+  type        = bool
+  description = "Assign public IPv4 addresses to EC2 instances launched in public subnets."
+}
+
+variable "log_retention_days" {
+  type        = number
+  description = "Retention for EKS and application logs, in days."
+}
+
 variable "aws_region" {
   type    = string
   default = "ap-southeast-2"

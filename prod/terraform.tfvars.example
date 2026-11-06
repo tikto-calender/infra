@@ -5,6 +5,17 @@ project_name = "tikto"
 terraform_state_bucket_name = "tikto-terraform-state"
 terraform_state_region      = "ap-southeast-2"
 
+network = {
+  vpc_cidr             = "10.20.0.0/16"
+  availability_zones   = ["ap-southeast-2a", "ap-southeast-2b", "ap-southeast-2c"]
+  public_subnet_cidrs  = ["10.20.0.0/24", "10.20.1.0/24", "10.20.2.0/24"]
+  private_subnet_cidrs = ["10.20.10.0/24", "10.20.11.0/24", "10.20.12.0/24"]
+  nat_gateway_mode     = "none"
+}
+
+map_public_ip_on_launch = true
+log_retention_days      = 30
+
 # Never leave the EKS API open to 0.0.0.0/0.
 cluster_public_access_cidrs = ["203.0.113.10/32"]
 

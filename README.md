@@ -12,16 +12,18 @@ The stacks use separate state keys in the existing S3 bucket `tikto-terraform-st
 
 ## Initial deployment
 
-Use Terraform 1.10 or newer and AWS credentials for the target account. From this repository's root, copy each stack's `terraform.tfvars.example` to `terraform.tfvars` if it does not already exist, then fill in the environment values. Review each saved plan before applying it.
+Use Terraform 1.10 or newer and AWS credentials for the target account. From this repository's root, copy each stack's `terraform.tfvars.example` to `terraform.tfvars` and `backend.hcl.example` to `backend.hcl` if the local files do not already exist. Fill in the environment values. The backend config selects the S3 state location at init time. If you customize that location, make sure Dev and Prod read the same Shared bucket, region, and key that Shared uses.
+
+For a working directory initialized with the previous inline backend, run init with `-reconfigure` after verifying that `backend.hcl` points to the same existing state object. Review each saved plan before applying it.
 
 ### 1. Shared
 
 Verify the state bucket and the GitHub OIDC subjects for the build and plan roles. Apply Shared first so that Dev and Prod can read its outputs and the application pipelines can publish images to ECR.
 
 ```sh
-terraform -chdir=shared init
-terraform -chdir=shared plan -out=tfplan
-terraform -chdir=shared apply tfplan
+terraform -chdir=shared init -backend-config=backend.hcl
+terraform -chdir=shared plan -out=local.tfplan
+terraform -chdir=shared apply local.tfplan
 ```
 
 ### 2. Development
@@ -29,9 +31,9 @@ terraform -chdir=shared apply tfplan
 Set the Backend and Notification image URIs to published ECR images and choose a unique frontend bucket name. The public ALB sends API traffic to Backend on port `3000`. Backend calls Notification on port `8000` through ECS Service Connect.
 
 ```sh
-terraform -chdir=dev init
-terraform -chdir=dev plan -out=tfplan
-terraform -chdir=dev apply tfplan
+terraform -chdir=dev init -backend-config=backend.hcl
+terraform -chdir=dev plan -out=local.tfplan
+terraform -chdir=dev apply local.tfplan
 terraform -chdir=dev output -raw application_url
 ```
 
@@ -44,14 +46,16 @@ Use the application URL to check `/api/health` after deployment. Terraform creat
 3. Wait for the Ingress to provision `tikto-prod-api` with the `tikto-prod-cloudfront-origin` security group. Set `enable_edge = true` and a unique `frontend_bucket_name`, then plan and apply Prod again to create the frontend bucket and CloudFront distribution.
 
 ```sh
-terraform -chdir=prod init
-terraform -chdir=prod plan -out=tfplan
-terraform -chdir=prod apply tfplan
+terraform -chdir=prod init -backend-config=backend.hcl
+terraform -chdir=prod plan -out=local.tfplan
+terraform -chdir=prod apply local.tfplan
 ```
 
 ## CI/CD
 
 The [Terraform workflow](.github/workflows/terraform-plan.yml) checks formatting and validates the root stacks on infrastructure pull requests. Run **Terraform validate and plan** manually to review changes against remote state. Apply approved plans separately.
+
+Set the environment inputs in the GitHub `infrastructure-plan` environment. In addition to the existing inputs, `DEV_TFVARS_JSON` requires `network`, `assign_public_ip`, and `log_retention_days`. `PROD_TFVARS_JSON` requires `network`, `map_public_ip_on_launch`, and `log_retention_days`. Use the corresponding `terraform.tfvars.example` for the field names and current topology.
 
 Application workflows use GitHub OIDC for AWS access. See each stack's `outputs.tf` for the role ARNs, ECS service names, bucket names, and CloudFront distribution IDs used by the [delivery workflows](https://github.com/tikto-calender/reusable-workflow).
 

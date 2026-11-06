@@ -16,12 +16,12 @@ module "network" {
   source = "../modules/network"
 
   name                    = local.name
-  vpc_cidr                = "10.20.0.0/16"
-  availability_zones      = ["ap-southeast-2a", "ap-southeast-2b", "ap-southeast-2c"]
-  public_subnet_cidrs     = ["10.20.0.0/24", "10.20.1.0/24", "10.20.2.0/24"]
-  private_subnet_cidrs    = ["10.20.10.0/24", "10.20.11.0/24", "10.20.12.0/24"]
-  nat_gateway_mode        = "none"
-  map_public_ip_on_launch = true
+  vpc_cidr                = var.network.vpc_cidr
+  availability_zones      = var.network.availability_zones
+  public_subnet_cidrs     = var.network.public_subnet_cidrs
+  private_subnet_cidrs    = var.network.private_subnet_cidrs
+  nat_gateway_mode        = var.network.nat_gateway_mode
+  map_public_ip_on_launch = var.map_public_ip_on_launch
   kubernetes_cluster_name = "${local.name}-eks"
 }
 
@@ -49,7 +49,7 @@ module "eks" {
   dynamodb_table_arn          = module.database.arn
   application_namespace       = "tikto-prod"
   application_service_account = "tikto-app"
-  log_retention_days          = 30
+  log_retention_days          = var.log_retention_days
   enable_secrets_encryption   = true
 }
 
@@ -57,7 +57,7 @@ module "observability" {
   source = "../modules/eks-observability"
 
   cluster_name       = module.eks.cluster_name
-  log_retention_days = 30
+  log_retention_days = var.log_retention_days
   alarm_actions      = var.monitoring_alarm_actions
 
   depends_on = [module.eks]
