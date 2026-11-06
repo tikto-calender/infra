@@ -34,3 +34,8 @@ output "alb_controller_role_arn" {
   description = "Pod Identity role used by AWS Load Balancer Controller."
 }
 
+output "external_secrets_role_arn" {
+  value       = try(aws_iam_role.external_secrets[0].arn, null)
+  description = "Pod Identity role used by External Secrets, or null when disabled."
+}
+

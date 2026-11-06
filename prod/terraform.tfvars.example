@@ -1,0 +1,36 @@
+aws_region   = "ap-southeast-2"
+project_name = "tikto"
+
+# Existing remote-state bucket in ap-southeast-2.
+terraform_state_bucket_name = "tikto-terraform-state"
+terraform_state_region      = "ap-southeast-2"
+
+# Never leave the EKS API open to 0.0.0.0/0.
+cluster_public_access_cidrs = ["203.0.113.10/32"]
+
+kubernetes_version = "1.36"
+
+node_instance_types = ["t3a.medium", "t3.medium"]
+node_capacity_type  = "SPOT"
+node_min_size       = 2
+node_desired_size   = 2
+node_max_size       = 4
+
+# Phase 1: keep false. After GitOps creates tikto-prod-api, set true and apply again.
+enable_edge = false
+
+# Required only when enable_edge = true.
+frontend_bucket_name = null
+frontend_aliases     = []
+
+# frontend_bucket_name          = "your-unique-tikto-prod-frontend"
+# frontend_aliases              = ["app.example.com"]
+# frontend_acm_certificate_arn  = "arn:aws:acm:us-east-1:123456789012:certificate/REPLACE"
+# frontend_route53_zone_id      = "Z0123456789EXAMPLE"
+
+github_frontend_oidc_subjects = [
+  "repo:tikto-calender@350233177/frontend@1440751116:environment:prod"
+]
+
+# Optional SNS topics for alarm notifications.
+monitoring_alarm_actions = []

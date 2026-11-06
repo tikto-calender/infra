@@ -1,21 +1,16 @@
-output "adot_role_arn" {
+output "cloudwatch_agent_role_arn" {
   value       = aws_iam_role.adot.arn
-  description = "Pod Identity role for the ADOT collector."
-}
-
-output "fluent_bit_role_arn" {
-  value       = aws_iam_role.fluent_bit.arn
-  description = "Pod Identity role for Fluent Bit."
+  description = "Pod Identity role for the CloudWatch Observability add-on."
 }
 
 output "application_log_group" {
   value       = aws_cloudwatch_log_group.application.name
-  description = "CloudWatch log group used by Fluent Bit."
+  description = "CloudWatch log group for application logs."
 }
 
 output "performance_log_group" {
   value       = aws_cloudwatch_log_group.performance.name
-  description = "CloudWatch log group used by ADOT Container Insights."
+  description = "CloudWatch log group used by Container Insights."
 }
 
 output "dashboard_name" {

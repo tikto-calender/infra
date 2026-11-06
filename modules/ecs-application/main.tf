@@ -10,8 +10,6 @@ locals {
 
   backend_environment = merge({
     APP_ENV                         = var.environment
-    APP_VERSION                     = var.app_version
-    IMAGE_TAG                       = var.backend_image_tag
     PORT                            = tostring(local.backend_port)
     STORE_BACKEND                   = "dynamodb"
     DYNAMODB_TABLE                  = var.dynamodb_table_name
@@ -25,6 +23,8 @@ locals {
   }, var.notification_environment)
 }
 
+data "aws_caller_identity" "current" {}
+
 data "aws_ec2_managed_prefix_list" "cloudfront" {
   name = "com.amazonaws.global.cloudfront.origin-facing"
 }
@@ -36,6 +36,18 @@ data "aws_iam_policy_document" "ecs_tasks_assume" {
     principals {
       type        = "Service"
       identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:*"]
     }
   }
 }
@@ -86,6 +98,31 @@ resource "aws_iam_role" "notification" {
   tags               = local.common_tags
 }
 
+data "aws_iam_policy_document" "ecs_exec" {
+  statement {
+    sid = "EcsExecChannels"
+    actions = [
+      "ssmmessages:CreateControlChannel",
+      "ssmmessages:CreateDataChannel",
+      "ssmmessages:OpenControlChannel",
+      "ssmmessages:OpenDataChannel"
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "backend_exec" {
+  name   = "ecs-exec"
+  role   = aws_iam_role.backend.id
+  policy = data.aws_iam_policy_document.ecs_exec.json
+}
+
+resource "aws_iam_role_policy" "notification_exec" {
+  name   = "ecs-exec"
+  role   = aws_iam_role.notification.id
+  policy = data.aws_iam_policy_document.ecs_exec.json
+}
+
 resource "aws_cloudwatch_log_group" "backend" {
   name              = "/ecs/${var.name}/backend"
   retention_in_days = var.log_retention_days
@@ -117,6 +154,11 @@ resource "aws_service_discovery_http_namespace" "this" {
   name        = "${var.name}.internal"
   description = "ECS Service Connect namespace for ${var.name}"
   tags        = local.common_tags
+}
+
+resource "aws_ecs_cluster_capacity_providers" "this" {
+  cluster_name       = aws_ecs_cluster.this.name
+  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
 }
 
 resource "aws_security_group" "alb" {
@@ -240,6 +282,9 @@ resource "aws_ecs_task_definition" "notification" {
       name      = "notification"
       image     = var.notification_image
       essential = true
+      linuxParameters = {
+        initProcessEnabled = true
+      }
       portMappings = [
         {
           name          = "notification"
@@ -276,6 +321,11 @@ resource "aws_ecs_task_definition" "notification" {
     }
   ])
 
+  depends_on = [
+    aws_iam_role_policy_attachment.execution,
+    aws_iam_role_policy.notification_exec
+  ]
+
   tags = local.common_tags
 }
 
@@ -293,6 +343,9 @@ resource "aws_ecs_task_definition" "backend" {
       name      = "backend"
       image     = var.backend_image
       essential = true
+      linuxParameters = {
+        initProcessEnabled = true
+      }
       portMappings = [
         {
           name          = "backend"
@@ -325,6 +378,12 @@ resource "aws_ecs_task_definition" "backend" {
       }
     }
   ])
+
+  depends_on = [
+    aws_iam_role_policy_attachment.execution,
+    aws_iam_role_policy.backend,
+    aws_iam_role_policy.backend_exec
+  ]
 
   tags = local.common_tags
 }
@@ -372,6 +431,13 @@ resource "aws_ecs_service" "notification" {
 
   propagate_tags = "SERVICE"
   tags           = local.common_tags
+
+  # CI/CD owns the deployed revision after Terraform bootstraps the service.
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
+
+  depends_on = [aws_ecs_cluster_capacity_providers.this]
 }
 
 resource "aws_ecs_service" "backend" {
@@ -416,7 +482,12 @@ resource "aws_ecs_service" "backend" {
   tags           = local.common_tags
 
   depends_on = [
+    aws_ecs_cluster_capacity_providers.this,
     aws_ecs_service.notification,
     aws_lb_listener.http
   ]
+
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
 }

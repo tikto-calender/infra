@@ -1,3 +1,0 @@
-aws_region        = "ap-southeast-1"
-project_name      = "tikto"
-state_bucket_name = "REPLACE-tikto-terraform-state"

@@ -33,17 +33,6 @@ variable "notification_image" {
   description = "Immutable notification image URI including its tag or digest."
 }
 
-variable "backend_image_tag" {
-  type        = string
-  description = "Image tag or Git SHA exposed by /api/runtime."
-}
-
-variable "app_version" {
-  type        = string
-  description = "Application version exposed by /api/runtime."
-  default     = "dev"
-}
-
 variable "dynamodb_table_name" {
   type        = string
   description = "DynamoDB table used by the backend."

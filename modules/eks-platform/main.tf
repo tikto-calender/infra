@@ -13,6 +13,7 @@ locals {
 }
 
 data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
 
 data "aws_iam_policy_document" "eks_cluster_assume" {
   statement {
@@ -160,7 +161,7 @@ resource "aws_eks_node_group" "this" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = "system"
   node_role_arn   = aws_iam_role.nodes.arn
-  subnet_ids      = var.private_subnet_ids
+  subnet_ids      = coalesce(var.node_subnet_ids, var.private_subnet_ids)
   capacity_type   = var.node_capacity_type
   instance_types  = var.node_instance_types
 
@@ -247,7 +248,10 @@ resource "aws_eks_pod_identity_association" "application" {
   service_account = var.application_service_account
   role_arn        = aws_iam_role.application.arn
 
-  depends_on = [aws_eks_addon.this["eks-pod-identity-agent"]]
+  depends_on = [
+    aws_eks_addon.this["eks-pod-identity-agent"],
+    aws_iam_role_policy.application
+  ]
 }
 
 resource "aws_iam_role" "alb_controller" {
@@ -273,7 +277,56 @@ resource "aws_eks_pod_identity_association" "alb_controller" {
   service_account = var.alb_controller_service_account
   role_arn        = aws_iam_role.alb_controller.arn
 
-  depends_on = [aws_eks_addon.this["eks-pod-identity-agent"]]
+  depends_on = [
+    aws_eks_addon.this["eks-pod-identity-agent"],
+    aws_iam_role_policy_attachment.alb_controller
+  ]
+}
+
+resource "aws_iam_role" "external_secrets" {
+  count = length(var.secrets_manager_secret_names) > 0 ? 1 : 0
+
+  name               = "${var.name}-external-secrets"
+  assume_role_policy = data.aws_iam_policy_document.pod_identity_assume.json
+  tags               = local.common_tags
+}
+
+data "aws_iam_policy_document" "external_secrets" {
+  count = length(var.secrets_manager_secret_names) > 0 ? 1 : 0
+
+  statement {
+    sid = "ReadApplicationSecrets"
+    actions = [
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:GetSecretValue"
+    ]
+    resources = [
+      for name in var.secrets_manager_secret_names :
+      "arn:aws:secretsmanager:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:secret:${name}-*"
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "external_secrets" {
+  count = length(var.secrets_manager_secret_names) > 0 ? 1 : 0
+
+  name   = "secrets-manager"
+  role   = aws_iam_role.external_secrets[0].id
+  policy = data.aws_iam_policy_document.external_secrets[0].json
+}
+
+resource "aws_eks_pod_identity_association" "external_secrets" {
+  count = length(var.secrets_manager_secret_names) > 0 ? 1 : 0
+
+  cluster_name    = aws_eks_cluster.this.name
+  namespace       = var.external_secrets_namespace
+  service_account = var.external_secrets_service_account
+  role_arn        = aws_iam_role.external_secrets[0].arn
+
+  depends_on = [
+    aws_eks_addon.this["eks-pod-identity-agent"],
+    aws_iam_role_policy.external_secrets
+  ]
 }
 
 check "node_scaling_bounds" {

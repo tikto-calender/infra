@@ -1,231 +1,58 @@
 # TikTo AWS Infrastructure
 
-Terraform infrastructure is split into one bootstrap prerequisite and three operational stacks:
+Terraform for TikTo's development and production environments in AWS Sydney (`ap-southeast-2`).
 
-| Stack | State key | Owns |
-| --- | --- | --- |
-| `bootstrap` | Local state | Versioned and encrypted S3 state bucket |
-| `shared` | `tikto/shared/terraform.tfstate` | Shared VPC, subnets, NAT, ECR and GitHub OIDC roles |
-| `dev` | `tikto/dev/terraform.tfstate` | DynamoDB Dev, ECS Fargate, public ALB, frontend S3/CloudFront |
-| `prod` | `tikto/prod/terraform.tfstate` | DynamoDB Prod, EKS, observability and optional production edge |
-
-`bootstrap` is not an application stack. It runs once because an S3 backend cannot create its own bucket.
-
-## Architecture
-
-```text
-                         shared state
-                              │
-              ┌───────────────┴────────────────┐
-              │                                │
-        public subnets                   private subnets
-              │                                │
-Dev CloudFront → ALB → ECS              EKS production
-              │                                ├── DynamoDB via Pod Identity
-              └── DynamoDB via task role       └── ADOT/Fluent Bit → CloudWatch
-
-Prod phase 2:
-CloudFront → VPC Origin → internal ALB created by GitOps → EKS
-```
-
-Both environments share one VPC. Security groups and IAM roles isolate workloads, but deleting the shared VPC affects both environments.
-
-## Repository layout
-
-```text
-Infrastructure/
-├── .github/workflows/terraform-plan.yml
-├── environments/
-│   ├── bootstrap/
-│   ├── shared/
-│   ├── dev/
-│   └── prod/
-└── modules/
-    ├── network/
-    ├── dynamodb/
-    ├── ecr/
-    ├── ecs-application/
-    ├── eks-platform/
-    ├── eks-observability/
-    ├── frontend-edge/
-    ├── cloudfront-vpc-origin/
-    └── github-oidc-role/
-```
-
-- [Environment configuration and commands](environments/README.md)
-- [Module responsibilities, inputs and outputs](modules/README.md)
-
-## Defaults
-
-| Setting | Value |
+| Stack | Owns |
 | --- | --- |
-| Region | `ap-southeast-1` |
-| Shared VPC | `10.20.0.0/16`, three AZs |
-| Public subnets | `10.20.0.0/24` through `10.20.2.0/24` |
-| Private subnets | `10.20.10.0/24` through `10.20.12.0/24` |
-| NAT | One NAT Gateway; use `one_per_az` for zonal HA |
-| Development | ECS Fargate in public subnets with restrictive security groups |
-| Production | EKS private Spot nodes, desired/min/max `2/2/4` |
-| Database | DynamoDB on-demand; production has PITR and deletion protection |
-| Monitoring | CloudWatch logs, Container Insights dashboard and alarms |
+| [Shared](shared/main.tf) | ECR repositories for Backend and Notification, the GitHub OIDC provider, and IAM roles for image publishing and Terraform plans |
+| [Development](dev/main.tf) | A dedicated VPC, ECS Fargate services, public ALB, DynamoDB, S3 frontend, and CloudFront |
+| [Production](prod/main.tf) | A dedicated VPC, EKS with managed worker nodes, DynamoDB, CloudWatch, and the S3 and CloudFront edge. Kubernetes Ingress provisions the public ALB. |
 
-No application AWS access key is stored. ECS uses task roles and EKS uses Pod Identity. Secrets Manager is intentionally absent until the application has a real password or API token.
+The stacks use separate state keys in the existing S3 bucket `tikto-terraform-state`. Dev and Prod read the GitHub OIDC provider ARN from Shared. For the inputs, resources, and outputs of each reusable component, see the [module catalog](modules/README.md).
 
-## Deployment order
+## Initial deployment
 
-### 1. Bootstrap state storage
+Use Terraform 1.10 or newer and AWS credentials for the target account. From this repository's root, copy each stack's `terraform.tfvars.example` to `terraform.tfvars` if it does not already exist, then fill in the environment values. Review each saved plan before applying it.
 
-```powershell
-Set-Location Infrastructure/environments/bootstrap
-Copy-Item terraform.tfvars.example terraform.tfvars
+### 1. Shared
 
-terraform init
-terraform plan -out=tfplan
-terraform apply tfplan
-terraform output state_bucket_name
+Verify the state bucket and the GitHub OIDC subjects for the build and plan roles. Apply Shared first so that Dev and Prod can read its outputs and the application pipelines can publish images to ECR.
+
+```sh
+terraform -chdir=shared init
+terraform -chdir=shared plan -out=tfplan
+terraform -chdir=shared apply tfplan
 ```
 
-Keep the bootstrap local state in a secure operator backup. The bucket has versioning, AES-256 encryption, public access blocking and `prevent_destroy`.
+### 2. Development
 
-### 2. Shared foundation
+Set the Backend and Notification image URIs to published ECR images and choose a unique frontend bucket name. The public ALB sends API traffic to Backend on port `3000`. Backend calls Notification on port `8000` through ECS Service Connect.
 
-Copy the state bucket name into both `backend.hcl` and `terraform.tfvars`:
-
-```powershell
-Set-Location ../shared
-Copy-Item backend.hcl.example backend.hcl
-Copy-Item terraform.tfvars.example terraform.tfvars
-
-terraform init -backend-config=backend.hcl
-terraform plan -out=tfplan
-terraform apply tfplan
-terraform output
+```sh
+terraform -chdir=dev init
+terraform -chdir=dev plan -out=tfplan
+terraform -chdir=dev apply tfplan
+terraform -chdir=dev output -raw application_url
 ```
 
-Shared must be applied before Dev or Prod because they read its VPC, subnet and OIDC outputs through `terraform_remote_state`.
+Use the application URL to check `/api/health` after deployment. Terraform creates the initial ECS task definitions. Backend CD registers and deploys later revisions, so changes to task settings require rolling out the corresponding revision.
 
-### 3. Development
+### 3. Production
 
-Set immutable backend/notification image URIs and a globally unique frontend bucket:
+1. Apply `prod` with `enable_edge = false` to create EKS, DynamoDB, and CloudWatch. If you administer EKS through its public endpoint, replace the example CIDR with your actual operator CIDR.
+2. Run the command from `terraform -chdir=prod output -raw kubectl_config_command`. Install the AWS Load Balancer Controller using the `kube-system/aws-load-balancer-controller` service account, then deploy the [Kubernetes manifests](https://github.com/tikto-calender/manifest) with published ECR images. Backend uses the `tikto-prod/tikto-app` service account for DynamoDB access.
+3. Wait for the Ingress to provision `tikto-prod-api` with the `tikto-prod-cloudfront-origin` security group. Set `enable_edge = true` and a unique `frontend_bucket_name`, then plan and apply Prod again to create the frontend bucket and CloudFront distribution.
 
-```powershell
-Set-Location ../dev
-Copy-Item backend.hcl.example backend.hcl
-Copy-Item terraform.tfvars.example terraform.tfvars
-
-terraform init -backend-config=backend.hcl
-terraform plan -out=tfplan
-terraform apply tfplan
-
-$url = terraform output -raw application_url
-Invoke-RestMethod "$url/api/health"
-Invoke-RestMethod "$url/api/runtime"
+```sh
+terraform -chdir=prod init
+terraform -chdir=prod plan -out=tfplan
+terraform -chdir=prod apply tfplan
 ```
 
-Dev Fargate tasks receive public IPs for egress but accept no public inbound traffic. The ALB only accepts the AWS-managed CloudFront origin-facing prefix list.
+## CI/CD
 
-### 4. Production phase 1
+The [Terraform workflow](.github/workflows/terraform-plan.yml) checks formatting and validates the root stacks on infrastructure pull requests. Run **Terraform validate and plan** manually to review changes against remote state. Apply approved plans separately.
 
-Keep `enable_edge = false` for the first apply:
+Application workflows use GitHub OIDC for AWS access. See each stack's `outputs.tf` for the role ARNs, ECS service names, bucket names, and CloudFront distribution IDs used by the [delivery workflows](https://github.com/tikto-calender/reusable-workflow).
 
-```powershell
-Set-Location ../prod
-Copy-Item backend.hcl.example backend.hcl
-Copy-Item terraform.tfvars.example terraform.tfvars
-
-terraform init -backend-config=backend.hcl
-terraform plan -out=tfplan
-terraform apply tfplan
-
-$configure = terraform output -raw kubectl_config_command
-Invoke-Expression $configure
-kubectl get nodes
-```
-
-This phase creates EKS, DynamoDB, Pod Identity roles, Container Insights log groups, dashboard and alarms. Argo CD then installs AWS Load Balancer Controller, ADOT and Fluent Bit.
-
-The GitOps production Ingress must create a stable internal ALB:
-
-```yaml
-alb.ingress.kubernetes.io/load-balancer-name: tikto-prod-api
-alb.ingress.kubernetes.io/scheme: internal
-alb.ingress.kubernetes.io/target-type: ip
-```
-
-### 5. Production phase 2
-
-After `tikto-prod-api` is active, update `terraform.tfvars`:
-
-```hcl
-enable_edge         = true
-frontend_bucket_name = "your-unique-tikto-prod-frontend"
-```
-
-Then run another plan and apply in the same `prod` stack:
-
-```powershell
-terraform plan -out=tfplan
-terraform apply tfplan
-terraform output application_url
-```
-
-This creates the CloudFront VPC Origin and routes `/api/*` privately to the internal ALB. It does not create a second Terraform state.
-
-## GitHub Actions plan workflow
-
-[terraform-plan.yml](.github/workflows/terraform-plan.yml) provides:
-
-- Pull requests: `terraform fmt -check` and `terraform validate` without AWS credentials.
-- Manual dispatch: GitHub OIDC authentication and ordered plans `shared → dev → prod`.
-- Job Summary counts for create, update, delete and replace actions.
-- Readable plan artifacts retained for five days; binary plans are not uploaded.
-- No automatic apply.
-
-Create a GitHub Environment named `infrastructure-plan` with:
-
-| Variable | Content |
-| --- | --- |
-| `AWS_REGION` | `ap-southeast-1` |
-| `AWS_TERRAFORM_PLAN_ROLE_ARN` | Shared output `github_terraform_plan_role_arn` |
-| `TF_STATE_BUCKET` | Bootstrap output `state_bucket_name` |
-| `SHARED_TFVARS_JSON` | Shared stack inputs as a JSON object |
-| `DEV_TFVARS_JSON` | Dev stack inputs as a JSON object |
-| `PROD_TFVARS_JSON` | Prod stack inputs as a JSON object |
-
-Because the plan job uses the `infrastructure-plan` GitHub Environment, the shared input must trust the matching OIDC subject:
-
-```json
-{
-  "terraform_state_bucket_name": "your-tikto-terraform-state",
-  "github_build_oidc_subjects": [
-    "repo:YOUR_ORG/YOUR_REPO:ref:refs/heads/main"
-  ],
-  "github_plan_oidc_subjects": [
-    "repo:YOUR_ORG/YOUR_REPO:environment:infrastructure-plan"
-  ]
-}
-```
-
-Example production input:
-
-```json
-{
-  "terraform_state_bucket_name": "your-tikto-terraform-state",
-  "cluster_public_access_cidrs": ["203.0.113.10/32"],
-  "enable_edge": false
-}
-```
-
-Run `bootstrap` and the first `shared` apply locally with AWS SSO. Then save the shared plan-role output in GitHub. The role has AWS `ReadOnlyAccess` plus state read/lock permissions, but no infrastructure mutation permission.
-
-## Validation
-
-```powershell
-terraform fmt -check -recursive Infrastructure
-terraform -chdir=Infrastructure/environments/bootstrap validate
-terraform -chdir=Infrastructure/environments/shared validate
-terraform -chdir=Infrastructure/environments/dev validate
-terraform -chdir=Infrastructure/environments/prod validate
-```
-
-Always review plans containing `delete` or `replace`. Production DynamoDB deletion protection intentionally blocks accidental table destruction.
+If upgrading an existing deployment from the shared VPC layout, review all three plans for network or workload replacements before applying.

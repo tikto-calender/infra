@@ -28,6 +28,12 @@ variable "private_subnet_cidrs" {
   type        = list(string)
 }
 
+variable "map_public_ip_on_launch" {
+  description = "Auto-assign public IPv4 addresses to instances launched in public subnets."
+  type        = bool
+  default     = false
+}
+
 variable "nat_gateway_mode" {
   description = "NAT topology: none, single, or one_per_az."
   type        = string

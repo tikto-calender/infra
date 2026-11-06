@@ -32,77 +32,30 @@ data "aws_iam_policy_document" "pod_identity_assume" {
 }
 
 resource "aws_iam_role" "adot" {
-  name               = "${var.cluster_name}-adot"
+  name               = "${var.cluster_name}-cloudwatch-agent"
   assume_role_policy = data.aws_iam_policy_document.pod_identity_assume.json
   tags               = local.common_tags
 }
 
-data "aws_iam_policy_document" "adot" {
-  statement {
-    sid       = "PublishContainerInsightsMetrics"
-    actions   = ["cloudwatch:PutMetricData"]
-    resources = ["*"]
+resource "aws_iam_role_policy_attachment" "cloudwatch_agent" {
+  role       = aws_iam_role.adot.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
 
-    condition {
-      test     = "StringEquals"
-      variable = "cloudwatch:namespace"
-      values   = ["ContainerInsights"]
-    }
+resource "aws_eks_addon" "cloudwatch_observability" {
+  cluster_name                = var.cluster_name
+  addon_name                  = "amazon-cloudwatch-observability"
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "PRESERVE"
+
+  pod_identity_association {
+    service_account = "cloudwatch-agent"
+    role_arn        = aws_iam_role.adot.arn
   }
 
-  statement {
-    sid = "WritePerformanceLogs"
-    actions = [
-      "logs:CreateLogStream",
-      "logs:DescribeLogStreams",
-      "logs:PutLogEvents"
-    ]
-    resources = ["${aws_cloudwatch_log_group.performance.arn}:*"]
-  }
-}
+  depends_on = [aws_iam_role_policy_attachment.cloudwatch_agent]
 
-resource "aws_iam_role_policy" "adot" {
-  name   = "container-insights"
-  role   = aws_iam_role.adot.id
-  policy = data.aws_iam_policy_document.adot.json
-}
-
-resource "aws_eks_pod_identity_association" "adot" {
-  cluster_name    = var.cluster_name
-  namespace       = var.namespace
-  service_account = var.adot_service_account
-  role_arn        = aws_iam_role.adot.arn
-}
-
-resource "aws_iam_role" "fluent_bit" {
-  name               = "${var.cluster_name}-fluent-bit"
-  assume_role_policy = data.aws_iam_policy_document.pod_identity_assume.json
-  tags               = local.common_tags
-}
-
-data "aws_iam_policy_document" "fluent_bit" {
-  statement {
-    sid = "WriteApplicationLogs"
-    actions = [
-      "logs:CreateLogStream",
-      "logs:DescribeLogStreams",
-      "logs:PutLogEvents"
-    ]
-    resources = ["${aws_cloudwatch_log_group.application.arn}:*"]
-  }
-}
-
-resource "aws_iam_role_policy" "fluent_bit" {
-  name   = "application-logs"
-  role   = aws_iam_role.fluent_bit.id
-  policy = data.aws_iam_policy_document.fluent_bit.json
-}
-
-resource "aws_eks_pod_identity_association" "fluent_bit" {
-  cluster_name    = var.cluster_name
-  namespace       = var.namespace
-  service_account = var.fluent_bit_service_account
-  role_arn        = aws_iam_role.fluent_bit.arn
+  tags = local.common_tags
 }
 
 resource "aws_cloudwatch_dashboard" "eks" {
