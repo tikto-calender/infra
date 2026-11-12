@@ -21,28 +21,17 @@ variable "availability_zones" {
 variable "public_subnet_cidrs" {
   description = "One public subnet CIDR per availability zone."
   type        = list(string)
-}
 
-variable "private_subnet_cidrs" {
-  description = "One private subnet CIDR per availability zone."
-  type        = list(string)
+  validation {
+    condition     = length(var.public_subnet_cidrs) == length(var.availability_zones)
+    error_message = "Provide one public subnet CIDR for each availability zone."
+  }
 }
 
 variable "map_public_ip_on_launch" {
   description = "Auto-assign public IPv4 addresses to instances launched in public subnets."
   type        = bool
   default     = false
-}
-
-variable "nat_gateway_mode" {
-  description = "NAT topology: none, single, or one_per_az."
-  type        = string
-  default     = "none"
-
-  validation {
-    condition     = contains(["none", "single", "one_per_az"], var.nat_gateway_mode)
-    error_message = "nat_gateway_mode must be none, single, or one_per_az."
-  }
 }
 
 variable "kubernetes_cluster_name" {

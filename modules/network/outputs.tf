@@ -17,13 +17,3 @@ output "public_subnet_ids" {
   value       = [for az in var.availability_zones : aws_subnet.public[az].id]
   description = "Public subnet IDs ordered like availability_zones."
 }
-
-output "private_subnet_ids" {
-  value       = [for az in var.availability_zones : aws_subnet.private[az].id]
-  description = "Private subnet IDs ordered like availability_zones."
-}
-
-output "nat_gateway_ids" {
-  value       = aws_nat_gateway.this[*].id
-  description = "NAT gateway IDs, empty when NAT is disabled."
-}

@@ -12,9 +12,6 @@ locals {
   ])
 }
 
-data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
-
 data "aws_iam_policy_document" "eks_cluster_assume" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -100,10 +97,10 @@ resource "aws_eks_cluster" "this" {
   }
 
   vpc_config {
-    subnet_ids              = var.private_subnet_ids
+    subnet_ids              = var.subnet_ids
     endpoint_private_access = true
-    endpoint_public_access  = length(var.cluster_public_access_cidrs) > 0
-    public_access_cidrs     = length(var.cluster_public_access_cidrs) > 0 ? var.cluster_public_access_cidrs : null
+    endpoint_public_access  = true
+    public_access_cidrs     = ["0.0.0.0/0"]
   }
 
   dynamic "encryption_config" {
@@ -158,10 +155,44 @@ resource "aws_launch_template" "nodes" {
 }
 
 resource "aws_eks_node_group" "this" {
+  count           = var.legacy_node_group == null ? 0 : 1
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = "system"
   node_role_arn   = aws_iam_role.nodes.arn
-  subnet_ids      = coalesce(var.node_subnet_ids, var.private_subnet_ids)
+  subnet_ids      = var.subnet_ids
+  capacity_type   = var.legacy_node_group.capacity_type
+  instance_types  = var.legacy_node_group.instance_types
+
+  launch_template {
+    id      = aws_launch_template.nodes.id
+    version = aws_launch_template.nodes.latest_version
+  }
+
+  scaling_config {
+    min_size     = var.legacy_node_group.min_size
+    desired_size = var.legacy_node_group.desired_size
+    max_size     = var.legacy_node_group.max_size
+  }
+
+  update_config {
+    max_unavailable_percentage = 50
+  }
+
+  depends_on = [aws_iam_role_policy_attachment.nodes]
+
+  tags = local.common_tags
+}
+
+moved {
+  from = aws_eks_node_group.this
+  to   = aws_eks_node_group.this[0]
+}
+
+resource "aws_eks_node_group" "shared" {
+  cluster_name    = aws_eks_cluster.this.name
+  node_group_name = "system-v2"
+  node_role_arn   = aws_iam_role.nodes.arn
+  subnet_ids      = var.subnet_ids
   capacity_type   = var.node_capacity_type
   instance_types  = var.node_instance_types
 
@@ -177,7 +208,7 @@ resource "aws_eks_node_group" "this" {
   }
 
   update_config {
-    max_unavailable_percentage = 50
+    max_unavailable = 1
   }
 
   depends_on = [aws_iam_role_policy_attachment.nodes]
@@ -193,7 +224,7 @@ resource "aws_eks_addon" "this" {
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "PRESERVE"
 
-  depends_on = [aws_eks_node_group.this]
+  depends_on = [aws_eks_node_group.shared]
 
   tags = local.common_tags
 }
@@ -219,6 +250,8 @@ resource "aws_iam_role" "application" {
 }
 
 data "aws_iam_policy_document" "application" {
+  for_each = merge({ prod = var.dynamodb_table_arn }, var.dev_application == null ? {} : { dev = var.dev_application.dynamodb_table_arn })
+
   statement {
     sid = "UseApplicationTable"
     actions = [
@@ -229,8 +262,8 @@ data "aws_iam_policy_document" "application" {
       "dynamodb:UpdateItem"
     ]
     resources = [
-      var.dynamodb_table_arn,
-      "${var.dynamodb_table_arn}/index/*"
+      each.value,
+      "${each.value}/index/*"
     ]
   }
 
@@ -239,7 +272,31 @@ data "aws_iam_policy_document" "application" {
 resource "aws_iam_role_policy" "application" {
   name   = "application"
   role   = aws_iam_role.application.id
-  policy = data.aws_iam_policy_document.application.json
+  policy = data.aws_iam_policy_document.application["prod"].json
+}
+
+resource "aws_iam_role" "dev_application" {
+  count              = var.dev_application == null ? 0 : 1
+  name               = "${var.name}-dev-application"
+  assume_role_policy = data.aws_iam_policy_document.pod_identity_assume.json
+  tags               = local.common_tags
+}
+
+resource "aws_iam_role_policy" "dev_application" {
+  count  = var.dev_application == null ? 0 : 1
+  name   = "application"
+  role   = aws_iam_role.dev_application[0].id
+  policy = data.aws_iam_policy_document.application["dev"].json
+}
+
+resource "aws_eks_pod_identity_association" "dev_application" {
+  count           = var.dev_application == null ? 0 : 1
+  cluster_name    = aws_eks_cluster.this.name
+  namespace       = "tikto-dev"
+  service_account = var.application_service_account
+  role_arn        = aws_iam_role.dev_application[0].arn
+
+  depends_on = [aws_eks_addon.this["eks-pod-identity-agent"], aws_iam_role_policy.dev_application]
 }
 
 resource "aws_eks_pod_identity_association" "application" {
@@ -280,52 +337,6 @@ resource "aws_eks_pod_identity_association" "alb_controller" {
   depends_on = [
     aws_eks_addon.this["eks-pod-identity-agent"],
     aws_iam_role_policy_attachment.alb_controller
-  ]
-}
-
-resource "aws_iam_role" "external_secrets" {
-  count = length(var.secrets_manager_secret_names) > 0 ? 1 : 0
-
-  name               = "${var.name}-external-secrets"
-  assume_role_policy = data.aws_iam_policy_document.pod_identity_assume.json
-  tags               = local.common_tags
-}
-
-data "aws_iam_policy_document" "external_secrets" {
-  count = length(var.secrets_manager_secret_names) > 0 ? 1 : 0
-
-  statement {
-    sid = "ReadApplicationSecrets"
-    actions = [
-      "secretsmanager:DescribeSecret",
-      "secretsmanager:GetSecretValue"
-    ]
-    resources = [
-      for name in var.secrets_manager_secret_names :
-      "arn:aws:secretsmanager:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:secret:${name}-*"
-    ]
-  }
-}
-
-resource "aws_iam_role_policy" "external_secrets" {
-  count = length(var.secrets_manager_secret_names) > 0 ? 1 : 0
-
-  name   = "secrets-manager"
-  role   = aws_iam_role.external_secrets[0].id
-  policy = data.aws_iam_policy_document.external_secrets[0].json
-}
-
-resource "aws_eks_pod_identity_association" "external_secrets" {
-  count = length(var.secrets_manager_secret_names) > 0 ? 1 : 0
-
-  cluster_name    = aws_eks_cluster.this.name
-  namespace       = var.external_secrets_namespace
-  service_account = var.external_secrets_service_account
-  role_arn        = aws_iam_role.external_secrets[0].arn
-
-  depends_on = [
-    aws_eks_addon.this["eks-pod-identity-agent"],
-    aws_iam_role_policy.external_secrets
   ]
 }
 

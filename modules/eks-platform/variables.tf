@@ -8,21 +8,9 @@ variable "kubernetes_version" {
   description = "EKS Kubernetes minor version. Use a version in standard support."
 }
 
-variable "private_subnet_ids" {
+variable "subnet_ids" {
   type        = list(string)
-  description = "Private subnets for the control plane ENIs and managed node group."
-}
-
-variable "cluster_public_access_cidrs" {
-  type        = list(string)
-  default     = []
-  description = "CIDRs allowed to reach the public Kubernetes API. Empty disables the public endpoint."
-}
-
-variable "node_subnet_ids" {
-  description = "Subnets for the managed node group. Defaults to the cluster's private subnets."
-  type        = list(string)
-  default     = null
+  description = "Subnets for the control plane network interfaces and managed node group."
 }
 
 variable "node_instance_types" {
@@ -66,6 +54,18 @@ variable "node_disk_size" {
   description = "Encrypted gp3 node disk size in GiB."
 }
 
+variable "legacy_node_group" {
+  description = "Existing system node group settings during migration. Null removes the group."
+  type = object({
+    instance_types = list(string)
+    capacity_type  = string
+    min_size       = number
+    desired_size   = number
+    max_size       = number
+  })
+  default = null
+}
+
 variable "control_plane_log_types" {
   type        = list(string)
   default     = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
@@ -89,6 +89,12 @@ variable "dynamodb_table_arn" {
   description = "Application DynamoDB table ARN."
 }
 
+variable "dev_application" {
+  type        = object({ dynamodb_table_arn = string })
+  default     = null
+  description = "Optional dev DynamoDB table for a separate Pod Identity role."
+}
+
 variable "application_namespace" {
   type        = string
   default     = "tikto-prod"
@@ -105,24 +111,6 @@ variable "alb_controller_service_account" {
   type        = string
   default     = "aws-load-balancer-controller"
   description = "AWS Load Balancer Controller service account."
-}
-
-variable "external_secrets_namespace" {
-  type        = string
-  default     = "external-secrets"
-  description = "Namespace containing the External Secrets controller."
-}
-
-variable "external_secrets_service_account" {
-  type        = string
-  default     = "external-secrets"
-  description = "Service account used by the External Secrets controller."
-}
-
-variable "secrets_manager_secret_names" {
-  type        = set(string)
-  default     = []
-  description = "Secrets Manager secret names that External Secrets may read."
 }
 
 variable "tags" {

@@ -3,6 +3,10 @@ output "cluster_name" {
   description = "EKS cluster name."
 }
 
+output "cluster_security_group_id" {
+  value = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
+}
+
 output "cluster_arn" {
   value       = aws_eks_cluster.this.arn
   description = "EKS cluster ARN."
@@ -33,9 +37,3 @@ output "alb_controller_role_arn" {
   value       = aws_iam_role.alb_controller.arn
   description = "Pod Identity role used by AWS Load Balancer Controller."
 }
-
-output "external_secrets_role_arn" {
-  value       = try(aws_iam_role.external_secrets[0].arn, null)
-  description = "Pod Identity role used by External Secrets, or null when disabled."
-}
-
