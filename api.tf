@@ -117,10 +117,6 @@ resource "aws_lb_listener_rule" "prod_backend" {
     target_group_arn = aws_lb_target_group.backend[each.key].arn
   }
 
-  lifecycle {
-    ignore_changes = [action]
-  }
-
   condition {
     path_pattern {
       values = ["/api", "/api/*"]
@@ -149,65 +145,4 @@ output "frontend_target_group_names" {
 moved {
   from = aws_lb_listener_rule.backend["prod"]
   to   = aws_lb_listener_rule.prod_backend["prod"]
-}
-
-resource "aws_lb_target_group" "backend_green" {
-  count = var.enable_edge ? 1 : 0
-
-  name        = "${var.project_name}-prod-eks-backend-green"
-  port        = 3000
-  protocol    = "HTTP"
-  target_type = "ip"
-  vpc_id      = module.network.vpc_id
-
-  health_check {
-    path    = "/api/health"
-    matcher = "200"
-  }
-}
-
-locals {
-  prod_backend_slots = var.enable_edge ? {
-    blue  = aws_lb_target_group.backend["prod"].arn
-    green = aws_lb_target_group.backend_green[0].arn
-  } : {}
-}
-
-resource "aws_lb_listener_rule" "backend_preview" {
-  for_each = length(var.preview_runner_cidrs) == 0 ? {} : local.prod_backend_slots
-
-  listener_arn = aws_lb_listener.api["prod"].arn
-  priority     = each.key == "blue" ? 10 : 11
-
-  action {
-    type             = "forward"
-    target_group_arn = each.value
-  }
-
-  condition {
-    path_pattern {
-      values = ["/api", "/api/*"]
-    }
-  }
-
-  condition {
-    http_header {
-      http_header_name = "X-TikTo-Preview"
-      values           = [each.key]
-    }
-  }
-
-  condition {
-    source_ip {
-      values = var.preview_runner_cidrs
-    }
-  }
-}
-
-output "backend_release_rule_arn" {
-  value = try(aws_lb_listener_rule.prod_backend["prod"].arn, null)
-}
-
-output "backend_release_target_arns" {
-  value = local.prod_backend_slots
 }

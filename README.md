@@ -69,4 +69,4 @@ kubectl wait --for=condition=Established crd/targetgroupbindings.elbv2.k8s.aws -
 
 [Deploy the app with Manifest](https://github.com/tikto-calender/manifest#deploy-with-argo-cd). Open the URL from `terraform output -raw dev_application_url` or `terraform output -raw application_url` and check `/api/health` and `/api/status`.
 
-For Backend blue/green, set `preview_runner_cidrs` and `github_oidc_provider_arn` before applying. [Backend release setup](https://github.com/tikto-calender/manifest#configure-backend-bluegreen)
+Prod routes `/api` to a single Backend target group. For an existing two-slot installation, follow the [Backend migration steps](https://github.com/tikto-calender/manifest#migrate-an-existing-backend-deployment) before applying the updated listener rule.

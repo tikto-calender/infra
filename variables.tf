@@ -99,20 +99,3 @@ variable "internal_alb_listener_port" {
   default     = 80
   description = "Public ALB origin listener port. The variable retains its legacy name."
 }
-
-variable "preview_runner_cidrs" {
-  type        = list(string)
-  default     = []
-  description = "Fixed egress CIDRs of the production smoke-test runner. An empty list disables preview routing."
-
-  validation {
-    condition     = length(var.preview_runner_cidrs) <= 2 && alltrue([for cidr in var.preview_runner_cidrs : can(cidrhost(cidr, 0)) && tonumber(split("/", cidr)[1]) > 0])
-    error_message = "Specify up to two restricted runner CIDRs."
-  }
-}
-
-variable "github_oidc_provider_arn" {
-  type        = string
-  default     = null
-  description = "Existing AWS IAM GitHub Actions OIDC provider ARN for the manifest production job."
-}

@@ -29,6 +29,3 @@ enable_edge = true
 
 # Optional SNS topics for alarm notifications.
 monitoring_alarm_actions = []
-
-# preview_runner_cidrs   = ["203.0.113.10/32"]
-# github_oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
