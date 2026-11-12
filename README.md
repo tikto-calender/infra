@@ -1,136 +1,144 @@
-# TikTo AWS Infrastructure (Terraform)
+# TikTo Infrastructure · Terraform
 
-This repository provisions the AWS platform for TikTo Calendar. It creates one EKS cluster in Sydney and a separate DynamoDB table and Application Load Balancer (ALB) for each environment. Once the platform is ready, Argo CD deploys the application from [Manifest](https://github.com/tikto-calender/manifest).
+Repo này dựng hạ tầng AWS cho TikTo Calendar ở Sydney (`ap-southeast-2`). Dev và Prod dùng chung một cụm EKS. Mỗi môi trường có namespace, Application Load Balancer (ALB) và bảng DynamoDB riêng. Argo CD đọc chart từ [repo Manifest](https://github.com/tikto-calender/manifest) để triển khai ứng dụng lên cụm.
 
-## Prerequisites
+## Chuẩn bị
 
-- Terraform 1.10 or later, AWS CLI v2, kubectl and Helm 3. The examples use PowerShell from this repository's root.
-- AWS credentials for the target account and an existing S3 bucket for Terraform state. Use `backend.hcl.example` for the backend settings and `terraform.tfvars.example` for the AWS resources.
-- A checkout of [Manifest](https://github.com/tikto-calender/manifest) next to this repository, in a directory named `manifest`, for controller and workload setup.
+- Terraform 1.10 trở lên, AWS CLI v2, kubectl và Helm.
+- AWS credentials cho đúng tài khoản và một bucket S3 đã tồn tại để lưu Terraform state.
+- Clone hai repo cạnh nhau để các đường dẫn `../manifest` bên dưới hoạt động.
 
-To check the configuration locally before connecting to an AWS state backend, run:
+**Linux/macOS và Windows PowerShell**
 
-```powershell
-terraform init -backend=false -input=false
-terraform validate
+```sh
+git clone https://github.com/tikto-calender/infra.git
+git clone https://github.com/tikto-calender/manifest.git
+cd infra
 ```
 
-Run this check in a fresh checkout if the current directory is already initialized against S3. The **Terraform validate** workflow also checks formatting on GitHub.
+Nếu đã có mã nguồn, mở terminal ở thư mục gốc repo Terraform.
 
-## Platform layout
+## 1. Tạo cấu hình và xem plan
 
-Three On-Demand `t3.medium` nodes, EKS control-plane network interfaces, and both ALBs use the same three public subnets. The nodes use public IPv4 and the Internet Gateway to reach GHCR. The Kubernetes API is reachable privately and from any public IPv4 address. EKS authenticates IAM identities and authorizes cluster access through its access configuration. Each public ALB sends /api requests to backend pods and serves all other paths from frontend pods on port 8080. Notification and Argo CD remain internal.
+**Linux/macOS**
 
-Dev and Prod share one Terraform configuration. For an existing deployment, keep the configured S3 state key `tikto/prod/terraform.tfstate`. To manage a legacy ECS Dev or Shared stack, use its previous configuration and matching state key.
+```sh
+[ -f backend.hcl ] || cp backend.hcl.example backend.hcl
+[ -f terraform.tfvars ] || cp terraform.tfvars.example terraform.tfvars
+```
 
-## 1. Plan and apply the EKS platform
-
-From the repository root in PowerShell, verify the AWS account. Create the local config files from the examples if needed. Set the state bucket in `backend.hcl` and review the settings in `terraform.tfvars`. Keep `enable_edge = true` and `enable_dev_edge = true` to use both public ALBs. If upgrading an existing stack that used CloudFront or a frontend S3 bucket, review any planned removals before applying.
-
-Check which state owns any existing runtime and DynamoDB tables with the same names. A CloudFormation-managed runtime needs a separate project name or an ownership migration before Terraform can manage those resources.
-
-Use `project_name = "tikto"` with the checked-in Helm environment values. If you change the project name, update their target group and DynamoDB names to match Terraform outputs.
-
-If an existing cluster uses private subnets for its control-plane network interfaces, migrate those interfaces to the public subnets before removing the old subnets and their routes. Review a separate migration plan if Terraform proposes subnet deletions.
+**Windows PowerShell**
 
 ```powershell
+if (-not (Test-Path backend.hcl)) { Copy-Item backend.hcl.example backend.hcl }
+if (-not (Test-Path terraform.tfvars)) { Copy-Item terraform.tfvars.example terraform.tfvars }
+```
+
+Điền tên bucket vào `backend.hcl`, rồi xem lại vùng AWS, mạng và cấu hình node trong `terraform.tfvars`. Với hạ tầng đang chạy, dùng đúng bucket và state key của lần triển khai trước. Giữ `project_name = "tikto"` để khớp với tên target group và bảng DynamoDB mặc định trong Manifest. Bật `enable_dev_edge` và `enable_edge` để dùng cả hai ALB.
+
+**Linux/macOS**
+
+```sh
+state_bucket='tikto-terraform-state' # Thay bằng bucket trong backend.hcl.
 aws sts get-caller-identity
-if (-not (Test-Path 'backend.hcl')) { Copy-Item 'backend.hcl.example' 'backend.hcl' }
-if (-not (Test-Path 'terraform.tfvars')) { Copy-Item 'terraform.tfvars.example' 'terraform.tfvars' }
+aws s3api head-bucket --bucket "$state_bucket" --region ap-southeast-2
+terraform init -backend-config=backend.hcl
+terraform validate
+terraform plan -out=platform.tfplan && terraform show platform.tfplan
 ```
 
-After editing both files, verify the bucket in `backend.hcl` and review the plan:
+**Windows PowerShell**
 
 ```powershell
-$stateBucket = 'tikto-terraform-state' # Use the bucket from backend.hcl.
+$stateBucket = 'tikto-terraform-state' # Thay bằng bucket trong backend.hcl.
+aws sts get-caller-identity
 aws s3api head-bucket --bucket $stateBucket --region ap-southeast-2
 terraform init '-backend-config=backend.hcl'
 terraform validate
 terraform plan '-out=platform.tfplan'
-if ($LASTEXITCODE -ne 0) { throw 'Terraform plan failed.' }
+if ($LASTEXITCODE -ne 0) { throw 'Terraform plan thất bại.' }
 terraform show platform.tfplan
 ```
 
-If Terraform asks to reinitialize the backend, verify the existing S3 bucket and key before rerunning init with `-reconfigure`. Stop if the plan replaces the Prod VPC, cluster, or DynamoDB table. If `terraform state list` shows an existing `aws_eks_node_group.this` address, set `legacy_node_group` before applying. Copy `instanceTypes`, `capacityType`, and `scalingConfig` from `aws eks describe-nodegroup --cluster-name tikto-prod-eks --nodegroup-name system --region ap-southeast-2` into `instance_types`, `capacity_type`, `min_size`, `desired_size`, and `max_size`. Verify the new plan retains `system` and creates `system-v2`.
+Kiểm tra đúng tài khoản và state trước khi apply. Nếu plan thay thế VPC, EKS hoặc bảng Prod, dừng lại để kiểm tra nguyên nhân. Nếu CloudFormation đang quản lý tài nguyên trùng tên, cần chuyển quyền quản lý hoặc dùng tên dự án và tài nguyên riêng.
+
+Để chỉ kiểm tra cấu hình trong một checkout mới, cả hai hệ điều hành dùng `terraform init -backend=false -input=false`, `terraform validate` và `terraform fmt -check -recursive`. GitHub Actions chạy các kiểm tra này trong workflow **Terraform validate**.
+
+## 2. Apply và kết nối EKS
+
+Sau khi đã duyệt plan, chạy các lệnh sau. Bước apply tạo tài nguyên có tính phí trên AWS.
+
+**Linux/macOS**
+
+```sh
+terraform apply platform.tfplan
+cluster=$(terraform output -raw cluster_name)
+vpc=$(terraform output -raw vpc_id)
+aws eks update-kubeconfig --region ap-southeast-2 --name "$cluster"
+kubectl get nodes
+```
+
+**Windows PowerShell**
 
 ```powershell
 terraform apply platform.tfplan
 $cluster = terraform output -raw cluster_name
 $vpc = terraform output -raw vpc_id
 aws eks update-kubeconfig --region ap-southeast-2 --name $cluster
-kubectl get nodes -L eks.amazonaws.com/nodegroup,topology.kubernetes.io/zone
+kubectl get nodes
 ```
 
-Use the AWS identity that created the cluster, or list additional IAM role ARNs in `eks_admin_role_arns` to grant those roles cluster-wide administration through EKS access entries. An AWS CLI profile selects an identity. To use a named profile, add `--profile my-eks-profile` to `aws eks update-kubeconfig` and replace the name with your profile.
+Dùng IAM identity đã tạo cluster hoặc một role đã khai báo trong `eks_admin_role_arns`. Nếu dùng AWS CLI profile, truyền đúng `--profile` khi cập nhật kubeconfig.
 
-For a migration, wait for all three `system-v2` nodes to be Ready. Cordon all old nodes, then drain them one at a time with `kubectl drain NODE --ignore-daemonsets`. Review eviction blockers and workload health before proceeding. Remove `legacy_node_group` from local tfvars only after workload migration, then review a fresh plan that deletes the old group. Keep the old ECS Dev stack running if it still serves traffic. The new Dev table is `tikto-dev-eks-app`. Review any data migration before redirecting Dev traffic or retiring ECS.
+<a name="2-bootstrap-controllers-and-gitops"></a>
 
-## 2. Bootstrap controllers and GitOps
+## 3. Cài controller và triển khai ứng dụng
 
-Use Helm 3 and kubectl from the `Infrastructure` directory. The commands assume the `manifest` checkout is a sibling directory. Publish the reusable workflow changes and the manifest Helm chart to their respective `main` branches before enabling the application workflows. After the AWS infrastructure apply, the Load Balancer Controller reconciles the `TargetGroupBinding` resources in Git and registers frontend and backend pod IPs in the existing target groups.
+Giữ terminal đã đặt `cluster` và `vpc` ở bước trên. Kiểm tra context Kubernetes trỏ vào EKS vừa tạo. Các lệnh dưới đây dùng được trên **Linux/macOS và Windows PowerShell**.
 
-```powershell
-$cluster = terraform output -raw cluster_name
-$vpc = terraform output -raw vpc_id
-aws eks update-kubeconfig --region ap-southeast-2 --name $cluster
-kubectl get nodes
-
+```sh
+kubectl config current-context
 kubectl apply -f ../manifest/bootstrap/namespaces.yaml
 helm repo add eks https://aws.github.io/eks-charts
 helm repo add argo https://argoproj.github.io/argo-helm
 helm repo update
-
-helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller `
-  --namespace kube-system --version 1.14.0 --wait `
-  --set "clusterName=$cluster" --set 'region=ap-southeast-2' --set "vpcId=$vpc" `
-  --set 'serviceAccount.name=aws-load-balancer-controller'
-
-helm upgrade --install argocd argo/argo-cd `
-  --namespace argocd --version 9.4.0 --wait --timeout 10m `
-  -f ../manifest/bootstrap/argocd-values.yaml
-
+helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller --namespace kube-system --version 1.14.0 --wait --set "clusterName=$cluster" --set "region=ap-southeast-2" --set "vpcId=$vpc" --set "serviceAccount.name=aws-load-balancer-controller"
+helm upgrade --install argocd argo/argo-cd --namespace argocd --version 9.4.0 --wait --timeout 10m -f ../manifest/bootstrap/argocd-values.yaml
 kubectl wait --for=condition=Established crd/targetgroupbindings.elbv2.k8s.aws --timeout=120s
 kubectl -n argocd get pods
 ```
 
-On controller upgrades, apply the CRDs from the pinned chart before upgrading if the upstream release requires it. To access Argo CD, use `kubectl -n argocd port-forward svc/argocd-server 8080:443`. If the manifest repo is private, configure Argo CD with read-only repository credentials first.
+AWS Load Balancer Controller đăng ký IP của pod vào target group. Sau khi các image GHCR đã có digest hợp lệ trên `manifest/main`, làm theo [bước deploy của Manifest](https://github.com/tikto-calender/manifest#deploy-with-argo-cd). Nếu repo Manifest là private, cấu hình quyền đọc trong Argo CD trước khi tạo Application. Khi nâng phiên bản controller, xem yêu cầu nâng cấp CRD của chart đang dùng.
 
-Publish the chart and both sets of environment values to `main` in `tikto-calender/manifest`. Argo CD tracks `main` and renders the same chart with separate Dev and Prod values. The GitOps workflows need permission to push image updates to that branch.
+Để cập nhật digest Dev từ repo ứng dụng, cấp `GITOPS_TOKEN` quyền ghi Manifest. Các image GHCR hiện được kéo ẩn danh. Để promote, cấp Manifest quyền **Write** trên package tương ứng. Với Backend blue/green, điền `preview_runner_cidrs` và `github_oidc_provider_arn` trước khi apply, rồi dùng Terraform outputs để cấu hình [GitHub Environment `prod` của Manifest](https://github.com/tikto-calender/manifest#configure-backend-bluegreen).
 
-Make the `GITOPS_TOKEN` Actions secret available to the Frontend, Backend and Notification repos. Scope it to `tikto-calender/manifest` with Contents write for the Dev image updates. If you override `GITOPS_REPOSITORY`, update both the repository URL and source allowlist in the Argo manifests to match.
+## 4. Kiểm tra Dev và Prod
 
-Merge qualifying application changes into `dev` to run **Deploy Dev**. Set the GHCR packages to **Public** for anonymous image pulls. Confirm the three Dev image files on manifest `main` point to pullable GHCR digests before applying the Dev Argo CD Application.
+Khi Argo CD báo `Synced` và `Healthy`, lấy URL từ Terraform outputs. Ví dụ kiểm tra Dev bên dưới. Với Prod, dùng output `application_url` thay cho `dev_application_url`.
 
-```powershell
-kubectl apply -f ../manifest/bootstrap/dev.yaml
-kubectl -n argocd get applications
-kubectl -n argocd wait application/tikto-dev '--for=jsonpath={.status.sync.status}=Synced' --timeout=5m
-kubectl -n argocd wait application/tikto-dev '--for=jsonpath={.status.health.status}=Healthy' --timeout=5m
-kubectl -n tikto-dev rollout status deployment/backend
-kubectl -n tikto-dev rollout status deployment/notification
-kubectl -n tikto-dev rollout status deployment/frontend
+**Linux/macOS**
+
+```sh
+url=$(terraform output -raw dev_application_url)
+curl -fsS -o /dev/null -w '%{http_code}\n' "$url/"
+curl -fsS "$url/api/health"
+curl -fsS "$url/api/status"
 ```
 
-When Dev is Synced and Healthy, check the running image digests. For the initial Prod deployment, confirm the Prod image files on manifest `main` point to pullable images, then apply `../manifest/bootstrap/prod.yaml`. Verify that Prod is Synced and Healthy and that the active Backend target group serves requests.
-
-For subsequent releases, grant Manifest **Write** access in each GHCR package's **Manage Actions access** settings. To enable Backend blue/green promotion, set `preview_runner_cidrs` and `github_oidc_provider_arn` before applying the platform and configure Manifest's `prod` Environment from the Terraform outputs. [Promotion instructions](https://github.com/tikto-calender/manifest#promote-to-production)
-
-## 3. Verify frontend and API through the ALB
-
-Argo CD deploys the frontend Nginx container in both namespaces. Leave `VITE_API_ORIGIN` empty when building the image so browser requests use the same ALB hostname. The default ALB listener action forwards frontend traffic to port 8080. The `/api` and `/api/*` rules forward to backend pods on port 3000.
+**Windows PowerShell**
 
 ```powershell
-kubectl -n tikto-dev get targetgroupbinding backend frontend
-kubectl -n tikto-prod get targetgroupbinding backend backend-green frontend
-terraform output frontend_target_group_names
-$devUrl = terraform output -raw dev_application_url
-$prodUrl = terraform output -raw application_url
-(Invoke-WebRequest "$devUrl/").StatusCode
-Invoke-RestMethod "$devUrl/api/health"
-Invoke-RestMethod "$devUrl/api/status"
-(Invoke-WebRequest "$prodUrl/").StatusCode
-Invoke-RestMethod "$prodUrl/api/health"
-Invoke-RestMethod "$prodUrl/api/status"
+$url = terraform output -raw dev_application_url
+(Invoke-WebRequest -UseBasicParsing "$url/").StatusCode
+Invoke-RestMethod "$url/api/health"
+Invoke-RestMethod "$url/api/status"
 ```
 
-Expect HTTP 200 from each frontend and `status: ok` from each Backend health endpoint. Use `/api/status` to check DynamoDB and Notification Service. Push another Dev commit and confirm the new digest rolls out only in Dev before promoting it. Before cutover, check node allocatable resources, Pending pods, CloudWatch memory and CPU, and EC2 CPU credits. In a test window, drain one node, confirm the workloads fit on two nodes, and uncordon it afterward. Notification stores records in memory, so replacing its pod clears those records. The two environments share failure and capacity boundaries because they run on the same cluster.
+Trang web phải trả HTTP 200. `/api/health` phải báo `ok`. `/api/status` cho biết Backend có đọc được DynamoDB và gọi được Notification Service hay không. ALB chuyển `/api` đến Backend và các đường dẫn khác đến Frontend trên cùng hostname.
+
+## Khi nâng cấp hạ tầng cũ
+
+- Giữ đúng state key của Prod. Các stack ECS Dev và Shared cũ cần được quản lý bằng cấu hình và state tương ứng. Kiểm tra dữ liệu Dev trước khi chuyển sang bảng `tikto-dev-eks-app`.
+- Nếu control plane còn dùng private subnet sắp bị xóa, chuyển giao diện mạng sang các subnet sẽ giữ lại trước. Kiểm tra riêng các thay đổi liên quan CloudFront hoặc bucket Frontend cũ trong plan.
+- Nếu state còn node group `system`, lấy thông số bằng `aws eks describe-nodegroup --region ap-southeast-2 --cluster-name tikto-prod-eks --nodegroup-name system` và điền `legacy_node_group`. Plan chuyển đổi phải giữ `system` và tạo `system-v2`. Chờ node mới `Ready`, cordon và drain node cũ từng máy. Sau khi workload đã chuyển xong, bỏ `legacy_node_group` rồi duyệt plan mới.
+- Dev và Prod chia sẻ CPU và RAM của cùng một cụm. Trước khi chuyển lưu lượng, kiểm tra pod `Pending`, sức chứa node và số liệu CloudWatch. Lịch sử Notification Service nằm trong RAM của pod.
